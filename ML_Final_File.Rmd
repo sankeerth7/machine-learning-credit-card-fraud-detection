@@ -1,0 +1,638 @@
+---
+title: "Final Project"
+author: "Shirley Liu, Sankeerth, Navya, Ammar - Group 10"
+date: "2024-07-23"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, echo=FALSE}
+library(ISLR2)
+library(MASS)
+library(caret)
+library(randomForest)
+library(gbm)
+library(rpart)
+library(rpart.plot)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(tree)
+fraud <- read.csv("/Users/Sankeerth/Documents/Intro to ML/Group_Project/cleaned_main_data.csv")
+
+fraud  = fraud %>% 
+  mutate(is_fraud = factor(is_fraud, levels=c(1,0),labels = c("Yes","No")))
+
+```
+
+# Exploratory Data Analysis
+
+# Class Imbalance
+
+```{r CountFraud, echo=FALSE}
+ggplot(fraud, aes(x = as.factor(is_fraud), fill = as.factor(is_fraud))) + 
+  geom_bar() + 
+  scale_x_discrete(labels = c("0" = "Not Fraud", "1" = "Fraud")) +  # Set custom x-axis labels
+  scale_y_continuous(labels = scales::comma) + 
+  scale_fill_manual(values = c("No" = "lightblue", "Yes" = "pink")) +  # Set colors for bars
+  labs(x = "Fraud Status", y = "Count", title = "Distribution of Fraud") +
+  theme_minimal()
+```
+
+# Fraud Transactions distribution as per hour of the day
+
+```{r is_fraud_hour, echo=FALSE}
+fraud_hour <- fraud %>%
+  filter(is_fraud == "Yes") %>%
+  count(txn_hour)
+print(fraud_hour)
+
+ggplot(fraud_hour, aes(x = txn_hour, y = n, fill = as.factor(txn_hour))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Count of Transactions by Hour Where is_fraud is True",
+       x = "Transaction Time",
+       y = "Count") +
+  theme_minimal() +
+  scale_fill_viridis_d() 
+```
+
+# Genuine Transactions distribution as per hour of the day
+
+```{r genuiene txn hour split}
+fraud_hour <- fraud %>%
+  filter(is_fraud == "No") %>%
+  count(txn_hour)
+print(fraud_hour)
+
+ggplot(fraud_hour, aes(x = txn_hour, y = n, fill = as.factor(txn_hour))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Count of Transactions by Hour Where is_fraud is No",
+       x = "Transaction Time",
+       y = "Count") +
+  theme_minimal() +
+  scale_fill_viridis_d() 
+```
+
+# Transaction amount distribution
+
+```{r}
+fraud_box <- fraud %>% 
+  filter(amt <= 10000)
+
+ggplot(fraud_box, aes(y = is_fraud, x = amt)) +
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 3, color = "red") +
+  labs(
+       y = "Fraud Status",
+       x = "Amount") +
+  theme_minimal()
+```
+
+# Bucketing all the hours into two categories
+
+```{r addNewColumnhour_cat, echo=FALSE}
+# Add a column called hour_cat and set to 2 categories as fraud is observed in a specific set of hours
+fraud <- fraud %>%
+  mutate(hour_cat = factor(case_when(
+    txn_hour %in% c(22,23,2,3,0,1) ~ "Yes",
+    !txn_hour %in% c(22,23,2,3,0,1) ~ "No",
+    TRUE ~ NA_character_  # Handles any unexpected values
+  )))
+
+```
+
+# Fraud Transactions distribution as per different Categories
+
+```{r Viewcategory, echo=FALSE}
+view_category <- fraud %>%
+  filter(is_fraud == "Yes") %>%
+  count(category)
+print(view_category)
+  
+  ggplot(view_category, aes(x = category, y = n, fill = as.factor(category))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Count of Transactions by Category Where is_fraud is True",
+       x = "Category",
+       y = "Count") +
+  theme_minimal() +
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_blank())
+```
+
+# Fraud Transaction distribution across different days of the week
+
+```{r TxnDayFraud, echo=FALSE}
+view_day <- fraud %>%
+  filter(is_fraud == "Yes") %>%
+  count(txn_week_day)
+print(view_day)
+  
+  ggplot(view_day, aes(x = txn_week_day, y = n, fill = as.factor(txn_week_day))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Count of Transactions by Day of Week Where is_fraud is True",
+       x = "Day",
+       y = "Count") +
+  theme_minimal() +
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_blank())
+```
+
+# Bucketing all the categories into 3 buckets based high/med/low fraud percentage
+
+```{r addNewColumnCategory_type, echo=FALSE}
+# Add a column called hour_cat and set to 3 categories based on amount of fraud high to low
+fraud <- fraud %>%
+  mutate(category_type = factor(case_when(
+    category %in% c("shopping_net", "grocery_pos") ~ "A",
+    category %in% c("shopping_pos", "misc_net", "gas_transport") ~ "B",
+    !(category %in% c("shopping_net", "grocery_pos", "shopping_pos", "misc_net", "gas_transport")) ~ "C",
+    TRUE ~ NA_character_  # Handles any unexpected values
+  )))
+
+```
+
+# Splitting the data set into train and test
+
+```{r TrainandTestSplit}
+
+fraud  = fraud %>% 
+  mutate(txn_week_day = factor(txn_week_day))
+
+
+set.seed(18)
+
+#-----Selecting only the required columns for the model training-----
+
+df <- fraud[, c("amt", "age","txn_hour","txn_week_day","hour_cat","category_type","is_fraud")]
+head(df)
+
+# Hold out 20% of the data as a final validation set
+train_ix = createDataPartition(df$is_fraud,
+                               p = 0.8)
+
+fraud_train = df[train_ix$Resample1,]
+fraud_test  = df[-train_ix$Resample1,]
+```
+
+# Data Type Conversion
+
+```{r buildDataFrame, echo=FALSE}
+#--Explicitly converting column types as per requirement---
+fraud_train$amt <- as.numeric(fraud_train$amt)
+fraud_train$age <- as.numeric(fraud_train$age)
+fraud_train$txn_hour <- as.numeric(fraud_train$txn_hour)
+
+```
+
+# Cross Validation - using 10 folds
+
+```{r setupCrossValidation, echo=FALSE}
+kcv = 10
+
+cv_folds = createFolds(fraud_train$is_fraud,
+                               k = kcv)
+
+# Defining a new summary function that computes a few different 
+# error metrics using pre-defined summaries
+
+my_summary = function(data, lev = NULL, model = NULL) {
+  default = defaultSummary(data, lev, model)
+  twoclass = twoClassSummary(data, lev, model)
+  # Converting to TPR and FPR instead of sensitivity/spec
+  twoclass[3] = 1-twoclass[3]
+  names(twoclass) = c("AUC_ROC", "TPR", "FPR")
+  logloss = mnLogLoss(data, lev, model)
+  c(default,twoclass, logloss)
+}
+
+fit_control <- trainControl(
+  method = "cv",
+  indexOut = cv_folds,
+  # Save predicted probabilities, not just classifications
+  classProbs = TRUE,
+  # Save all the holdout predictions, to summarize and plot
+  savePredictions = TRUE,
+  summaryFunction = my_summary,
+  selectionFunction="oneSE")
+
+```
+
+```{r makename}
+levels(fraud_train$is_fraud) <- make.names(levels(fraud_train$is_fraud))
+```
+
+# Defining the grid for Boosting Model Training
+
+```{r setupGrid}
+gbm_grid <-  expand.grid(interaction.depth = c(1,3,5,10), 
+                         n.trees = c(10,50,100,500,750,1000), 
+                         shrinkage = c(0.01),
+                         n.minobsinnode = 10)
+```
+
+```{r boosting}
+gbmfit <- train(is_fraud ~ ., data = fraud_train,
+                 method = "gbm",
+                 trControl = fit_control,
+                 tuneGrid = gbm_grid,
+                 metric = "logLoss",
+                 verbose = FALSE)
+
+print(gbmfit)
+plot(gbmfit)
+confusionMatrix(gbmfit)
+```
+
+# Defining threshold matrix
+
+```{r findThreshold1}
+
+thresholder(gbmfit, 
+            threshold = c(0.01,0.1,0.3,0.5,0.7), 
+            final = TRUE,
+            statistics = c("Sensitivity",
+                           "Specificity"))
+
+gbmfit_res = thresholder(gbmfit, 
+                         threshold = seq(0, 1, by = 0.01), 
+                         final = TRUE)
+```
+
+# TPR vs FPR across different thresholds
+
+```{r FNR_FPR graph}
+
+pldf = gbmfit_res %>%
+  mutate(TPR=Sensitivity, FPR = 1-Specificity, FNR = 1-Sensitivity) %>%
+  dplyr::select(-c(n.trees, interaction.depth, shrinkage, n.minobsinnode)) %>%
+  pivot_longer(-prob_threshold) 
+
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("TPR", "FPR"))) + 
+  geom_line() 
+
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("FNR", "FPR"))) + 
+  geom_line() 
+```
+
+```{r graph}
+
+thres = 0.01
+tp = gbmfit_res %>% 
+  dplyr::filter(prob_threshold==thres) %>% 
+  dplyr::select(prob_threshold, Sensitivity, Specificity) %>%
+  mutate(TPR=Sensitivity, FPR = 1-Specificity)
+
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("TPR", "FPR"))) + 
+  geom_line() + 
+  geom_vline(xintercept=thres, lty=2) + 
+  geom_point(aes(x=prob_threshold, y=TPR, color=NULL), data=tp) + 
+  geom_point(aes(x=prob_threshold, y=FPR, color=NULL), data=tp) 
+
+```
+
+# ROC Curve for Boosting
+
+# Goal: Identify the optimal threshold that maximizes the criterion J
+
+```{r ROC Curve Boosting}
+# ROC curve
+
+optim_J = gbmfit_res[which.max(gbmfit_res$J),]
+
+ggplot(aes(x=prob_threshold, y=J), 
+       data=gbmfit_res) + 
+  geom_line() + 
+  geom_vline(aes(xintercept=optim_J$prob_threshold), lty=2)
+
+ggplot(aes(x=1-Specificity, y=Sensitivity), data=gbmfit_res) + 
+  geom_line() + 
+  ylab("TPR (Sensitivity)") + 
+  xlab("FPR (1-Specificity)") + 
+  geom_abline(intercept=0, slope=1, linetype='dotted') +
+  geom_segment(aes(x=1-Specificity, xend=1-Specificity, y=1-Specificity, yend=Sensitivity), color='darkred', data=optim_J) + 
+  theme_bw()
+```
+
+# Precision recall Curve for Boosting Model
+
+```{r PR curve}
+
+
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("Precision", "Recall"))) + 
+  geom_line() 
+
+ggplot(aes(x=Recall, y=Precision), data=gbmfit_res) + 
+  geom_point() + 
+  geom_line() + 
+  ylab("Precision") + 
+  xlab("Recall (TPR)") + 
+  geom_point(aes(x=Recall, y=Precision), color='darkred', data=optim_J) + 
+  theme_bw()
+
+```
+
+# Lift Curve for Boosting Model
+
+```{r liftCurve}
+best_pars = gbmfit$bestTune
+best_preds = gbmfit$pred %>% filter(n.trees==best_pars$n.trees, 
+                                      interaction.depth==best_pars$interaction.depth)
+
+gbm_lift = caret::lift(obs~Yes, data=best_preds)
+
+ggplot(gbm_lift) + 
+  geom_abline(slope=1, linetype='dotted') +
+  xlim(c(0, 100)) + 
+  theme_bw()
+```
+
+```{r liftCurvexlim}
+best_pars = gbmfit$bestTune
+best_preds = gbmfit$pred %>% filter(n.trees==best_pars$n.trees, 
+                                      interaction.depth==best_pars$interaction.depth)
+
+gbm_lift = caret::lift(obs~Yes, data=best_preds)
+
+#look at xlim(0,10)
+ggplot(gbm_lift) + 
+   geom_abline(slope=1, linetype='dotted') +
+   xlim(c(0, 100)) + 
+   theme_bw()+xlim(0,10)
+```
+
+# Variable Importance as per Boosting Model
+
+```{r}
+varImp(gbmfit)
+plot(varImp(gbmfit))
+```
+
+# Calibration Graph for Boosting Model
+
+```{r calibration}
+gbm_cal = caret::calibration(obs~Yes, data=best_preds, cuts=7)
+ggplot(gbm_cal) + theme_bw()
+
+```
+
+```{r boostingIm}
+importance <- varImp(gbmfit, scale = FALSE)
+print(importance)
+```
+
+# Random Forest Model Training
+
+```{r rf_refit}
+rf_grid = data.frame(mtry = c(3,4,5,6))
+rf_fit <- train( is_fraud ~ ., data = fraud_train, 
+                 method = "rf", 
+                 trControl = fit_control,
+                 tuneGrid = rf_grid,
+                 ntree = 1000)
+
+```
+
+# Random Forest Results - Plot / Confusion Matrix
+
+```{r}
+print(rf_fit)
+plot(rf_fit)
+confusionMatrix(rf_fit)
+```
+
+# Variable Importance as per Random Forest Fit
+
+```{r Variable Importance Random Forest}
+varImp(rf_fit)
+plot(varImp(rf_fit))
+```
+
+```{r plot}
+results_df <- rf_fit$results
+
+# Plot using ggplot2
+ggplot(results_df, aes(x = mtry, y = AUC_ROC)) + 
+  geom_line() + 
+  geom_point() + 
+  labs(x = "mtry", y = "AUC ROC") + 
+  theme_bw()
+
+long_df <- results_df %>%
+  pivot_longer(cols = c(Accuracy, Kappa, AUC_ROC, TPR, FPR, logLoss, 
+                         AccuracySD, KappaSD, AUC_ROCSD, TPRSD, FPRSD, logLossSD),
+               names_to = "Metric",
+               values_to = "Value")
+
+ggplot(results_df, aes(x = mtry, y = TPR)) + 
+  geom_line() + 
+  geom_point() + 
+  labs(x = "mtry", y = "TPR", title = "True Positive Rate vs. mtry") + 
+  theme_bw()
+
+ggplot(results_df, aes(x = mtry, y = FPR)) + 
+  geom_line() + 
+  geom_point() + 
+  labs(x = "mtry", y = "FPR", title = "False Positive Rate vs. mtry") + 
+  theme_bw()
+```
+
+# Random Forest ROC Curve
+
+```{r Random Forest ROC Curve}
+
+# thresholder values
+rffit_res = thresholder(rf_fit, 
+                         threshold = seq(0, 1, by = 0.01), 
+                         final = TRUE)
+
+
+# ROC curve
+#Goal: Identify the optimal threshold that maximizes the criterion J
+optim_J = rffit_res[which.max(rffit_res$J),]
+
+ggplot(aes(x=prob_threshold, y=J), 
+       data=rffit_res) + 
+  geom_line() + 
+  geom_vline(aes(xintercept=optim_J$prob_threshold), lty=2)
+
+ggplot(aes(x=1-Specificity, y=Sensitivity), data=rffit_res) + 
+  geom_line() + 
+  ylab("TPR (Sensitivity)") + 
+  xlab("FPR (1-Specificity)") + 
+  geom_abline(intercept=0, slope=1, linetype='dotted') +
+  geom_segment(aes(x=1-Specificity, xend=1-Specificity, y=1-Specificity, yend=Sensitivity), color='darkred', data=optim_J) + 
+  theme_bw()
+```
+
+# Random Forest TPR vs FNR
+
+```{r Random Forest PLDF}
+pldf = rffit_res %>%
+  mutate(TPR=Sensitivity, FPR = 1-Specificity, FNR = 1-Sensitivity) %>%
+  dplyr::select(-c(mtry)) %>%
+  pivot_longer(-prob_threshold) 
+
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("TPR", "FPR"))) + 
+  geom_line() 
+
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("FNR", "FPR"))) + 
+  geom_line() 
+```
+
+# Random Forest PR Curve
+
+```{r random forest PR}
+# PR curve
+
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("Precision", "Recall"))) + 
+  geom_line() 
+
+ggplot(aes(x=Recall, y=Precision), data=rffit_res) + 
+  geom_point() + 
+  geom_line() + 
+  ylab("Precision") + 
+  xlab("Recall (TPR)") + 
+  geom_point(aes(x=Recall, y=Precision), color='darkred', data=optim_J) + 
+  theme_bw()
+
+```
+
+# Threshold Grid For Validation Set
+
+```{r Random Forest}
+thresholder(rf_fit, 
+            threshold = c(0.01,0.03,0.1,0.3,0.5,0.7), 
+            final = TRUE,
+            statistics = c("Sensitivity",
+                           "Specificity"))
+
+```
+
+# Calibration for the validation data set
+
+```{r}
+best_pars = rf_fit$bestTune
+best_preds = rf_fit$pred %>% filter(mtry==best_pars$mtry)
+
+rf_cal = caret::calibration(obs~Yes, data=best_preds, cuts=7)
+ggplot(rf_cal) + theme_bw()
+```
+
+# Hold Out Test
+
+# Validation using boosting
+
+```{r}
+############################################################################
+# Holdout set results
+############################################################################
+
+test_probs_gbm = predict(gbmfit, newdata = fraud_test, type="prob")
+
+get_metrics = function(threshold, test_probs, true_class, 
+                       pos_label, neg_label) {
+  # Get class predictions
+  pc = factor(ifelse(test_probs[pos_label]>=threshold, pos_label, neg_label), levels=c(pos_label, neg_label))
+  test_set = data.frame(obs = true_class, pred = pc, test_probs)
+  my_summary(test_set, lev=c(pos_label, neg_label))
+}
+
+```
+
+# Get metrics for a given threshold
+
+```{r}
+get_metrics(0, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.01, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.03, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.05, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.2, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.3, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.5, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.6, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.7, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.8, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.9, test_probs_gbm, fraud_test$is_fraud, "Yes", "No")
+```
+
+# Again Metrics using Validation data set using RF
+
+```{r}
+
+get_metrics(0, test_probs, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.01, test_probs, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.03, test_probs, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.05, test_probs, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.2, test_probs, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.3, test_probs, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.5, test_probs, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.6, test_probs, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.7, test_probs, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.8, test_probs, fraud_test$is_fraud, "Yes", "No")
+get_metrics(0.9, test_probs, fraud_test$is_fraud, "Yes", "No")
+```
+
+# Compute metrics on test data using a grid of thresholds
+
+```{r}
+thr_seq = seq(0, 1, length.out=500)
+
+#thr_seq = seq(0, 1, by = 0.01)
+#-------#
+####thr_seq = seq(0, 1, length.out=500)
+metrics = lapply(thr_seq, function(x) get_metrics(x, test_probs_gbm, fraud_test$is_fraud, "Yes", "No"))
+metrics_df = data.frame(do.call(rbind, metrics))
+```
+
+# ROC curve for Validation data set
+
+```{r}
+ggplot(aes(x=FPR, y=TPR), data=metrics_df) + 
+  geom_line() +
+  ylab("TPR (Sensitivity)") + 
+  xlab("FPR (1-Specificity)") + 
+  geom_abline(intercept=0, slope=1, linetype='dotted') +
+  annotate("text", x=0.75, y=0.25, 
+           label=paste("AUC:",round(metrics_df$AUC_ROC[1], 2))) +
+  theme_bw()
+```
+
+# Lift Curve for Validation
+
+```{r}
+gbm_oos_lift = caret::lift(fraud_test$is_fraud~test_probs_gbm[,1])
+
+ggplot(gbm_oos_lift) + 
+  geom_abline(slope=1, linetype='dotted') +
+  xlim(c(0, 100)) + 
+  theme_bw()
+```
+
+# Calibration
+
+```{r}
+gbm_cal_boost = caret::calibration(fraud_test$is_fraud~test_probs_gbm[,1], 
+                             data=best_preds, cuts=7)
+ggplot(gbm_cal_boost) + theme_bw()
+```
+
+```{r cf thresh}
+predictions_prob_rf <- predict(rf_fit, fraud_train, type = "prob")
+
+threshold <- 0.03
+
+predictions_class_rf <- ifelse(predictions_prob_rf[, "is_fraud"] > threshold, "Yes", "No")
+
+conf_matrix_rf <- confusionMatrix(predictions_class_rf, fraud_train$is_fraud)
+print(conf_matrix_rf)
+```
+
+#-----------------------------------------End--------------------------------
